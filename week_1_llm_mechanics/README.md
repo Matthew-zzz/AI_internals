@@ -6,10 +6,10 @@
 ---
 
 ## 📋 Чек-лист темы
-- [ ] Понять авторегрессию: P(w_n | w_1, ..., w_n-1)
-- [ ] Разобрать устройство Transformer Decoder (Q, K, V матрицы, Self-Attention)
-- [ ] Опробовать стратегии сэмплинга: Temperature, Top-K, Top-P (Nucleus), Min-P
-- [ ] Замерить потребление VRAM/RAM и TPS при поддержке KV-Cache
+- [x] Понять авторегрессию: P(w_n | w_1, ..., w_n-1)
+- [x] Разобрать устройство Transformer Decoder (Q, K, V матрицы, Self-Attention)
+- [x] Опробовать стратегии сэмплинга: Temperature, Top-K, Top-P (Nucleus), Min-P
+- [x] Замерить потребление VRAM/RAM и TPS при поддержке KV-Cache
 
 ---
 
