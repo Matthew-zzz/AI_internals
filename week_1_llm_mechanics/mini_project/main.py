@@ -8,7 +8,7 @@
 АРХИТЕКТУРА И ШАГИ РЕАЛИЗАЦИИ:
 
 1. КЛАСС `CustomInferenceEngine`:
-   - Метод `__init__(model_name, device, torch_dtype)`:
+   - Метод `__init__(model_name, device, dtype)`:
      * Загружает модель(в режиме eval()) и токенизатор.
      * Переводит веса в float16 или bfloat16 для оптимизации VRAM.
 
@@ -26,12 +26,12 @@
      * Выполняет декодирование и потоковый вывод токена в консоль (Streaming).
 
 2. КЛАСС `KVCacheProfiler`:
-   - Метод `profile_memory_and_speed(engine, prompt_lengths)`:
+   - Метод `calculate_memory_and_speed(engine, prompt_lengths)`:
      * Рассчитывает теоретический размер KV-Cache по формуле:
        Bytes = 2 * num_layers * num_heads * head_dim * seq_len * sizeof(dtype)
      * Измеряет реальное потребление памяти GPU (через torch.cuda.max_memory_allocated) и время работы.
-     * Рассчитывает реальный TPS (Tokens Per Second) в двух режимах: With KV-Cache vs Without KV-Cache.
-     * Формирует и выводит сравнительную сводную таблицу в консоль.
+     * Рассчитывает реальный TPS (Tokens Per Second) в двух режимах: With KV-Cache vs Without KV-Cache (upd. Для удобства сделано в классе CustomInferenceEngine).
+     * Формирует и выводит сравнительную сводную таблицу в консоль (upd. Для корректности сделано в классе ProfileTables).
 
 3. ТОЧКА ВХОДА (main):
    - Инициализирует движок, выполняет пробный генерационный стрим и запускает полный цикл профайлинга.
@@ -67,23 +67,24 @@ class GenerateResult:
 
     time_to_first_token: float
     tokens_per_second: float
-    kv_cache_prefill: float
-    kv_cache_total: float
+    theoretical_kv_cache_prefill: float
+    theoretical_kv_cache_total: float
     model_answer: str
 
 
 class CustomInferenceEngine:
+
     def __init__(
         self,
         model_name: str,
         device,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         tokenizer_name: str = None,
     ):
         self.device: torch.device = device
 
         self.model = (
-            AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype)
+            AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
             .to(self.device)
             .eval()
         )
@@ -188,28 +189,36 @@ class CustomInferenceEngine:
             )
 
             time_to_first_token = None
-            kv_cache_prefill = None
-            kv_cache_total = None
+            theoretical_kv_cache_prefill = None
+            theoretical_kv_cache_total = None
+
+            if samping_params.use_cache:
+                # Теоритический KV-кэш промпта
+                theoretical_kv_cache_prefill = (
+                    KVCacheProfiler.calculate_memory_and_speed(
+                        self, (input_ids_prompt.shape[-1])
+                    )
+                )
+
+                # Теоритический KV-кэш промпта + сгенерированные токены
+                theoretical_kv_cache_total = KVCacheProfiler.calculate_memory_and_speed(
+                    self, (input_ids_prompt.shape[-1] + max_tokens)
+                )
+
+            start_ttft = time.perf_counter()
 
             # Используем KV-кэш
             if sampling_params.use_cache:
                 cache = DynamicCache(config=self.model.config)
 
-                # KV-кэш промпта
-                kv_cache_prefill = KVCacheProfiler.profile_memory_and_speed(
-                    self, (input_ids_prompt.shape[-1])
-                )
-
-                # KV-кэш промпта + сгенерированные токены
-                kv_cache_total = KVCacheProfiler.profile_memory_and_speed(
-                    self, (input_ids_prompt.shape[-1] + max_tokens)
-                )
-
-                start_ttft = time.perf_counter()
-
                 output = self.model(
                     input_ids_prompt, use_cache=True, past_key_values=cache
                 )
+
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                time_to_first_token = time.perf_counter() - start_ttft
 
                 next_token = self.sample_logits(
                     logits=output.logits[:, -1, :],
@@ -221,14 +230,9 @@ class CustomInferenceEngine:
 
                 generated_tokens = next_token
 
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-
-                time_to_first_token = time.perf_counter() - start_ttft
-
                 start_tps = time.perf_counter()
-
                 for _ in range(max_tokens - 1):
+
                     output = self.model(
                         next_token, use_cache=True, past_key_values=cache
                     )
@@ -243,16 +247,18 @@ class CustomInferenceEngine:
                     )
                     generated_tokens = torch.cat([generated_tokens, next_token], dim=-1)
 
-                    word = self.tokenizer.decode(next_token.item())
-                    print(f"[{_}]Слово: {word}")
+                    # word = self.tokenizer.decode(next_token.item())
+                    # print(f"[{_}]Слово: {word}")
 
-                finish_tps = time.perf_counter() - start_tps
                 model_answer = self.tokenizer.decode(generated_tokens)
             # Не используем KV-кэш
             else:
                 output = self.model(input_ids_prompt, use_cache=False)
 
-                start_tps = time.perf_counter()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                time_to_first_token = time.perf_counter() - start_ttft
 
                 next_token = self.sample_logits(
                     output.logits[:, -1, :],
@@ -264,7 +270,8 @@ class CustomInferenceEngine:
 
                 generated_tokens = next_token
 
-                for _ in range(max_tokens):
+                start_tps = time.perf_counter()
+                for _ in range(max_tokens - 1):
 
                     output = self.model(
                         torch.cat([input_ids_prompt, generated_tokens], dim=-1),
@@ -280,24 +287,30 @@ class CustomInferenceEngine:
                         generated_tokens=generated_tokens,
                     )
 
+                    # word = self.tokenizer.decode(next_token.item())
+                    # print(f"[{_}]Слово: {word}")
+
                     generated_tokens = torch.cat([generated_tokens, next_token], dim=-1)
 
-                finish_tps = time.perf_counter() - start_tps
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
 
-                model_answer = self.tokenizer.decode(generated_tokens)
+            finish_tps = time.perf_counter() - start_tps
+
+            model_answer = self.tokenizer.decode(generated_tokens)
 
         return GenerateResult(
             time_to_first_token=(time_to_first_token if time_to_first_token else 0),
-            tokens_per_second=max_tokens / finish_tps,
-            kv_cache_prefill=kv_cache_prefill,
-            kv_cache_total=kv_cache_total,
+            tokens_per_second=(max_tokens - 1) / finish_tps,
+            theoretical_kv_cache_prefill=theoretical_kv_cache_prefill,
+            theoretical_kv_cache_total=theoretical_kv_cache_total,
             model_answer=model_answer,
         )
 
 
 class KVCacheProfiler:
     @staticmethod
-    def profile_memory_and_speed(engine: CustomInferenceEngine, prompt_lengths: int):
+    def calculate_memory_and_speed(engine: CustomInferenceEngine, prompt_lengths: int):
         """Фильтрует логиты(сырые веса), оставляя только кандидатов значения которых не ниже доли от значений лучшего кандидата
 
         Args:
@@ -308,7 +321,7 @@ class KVCacheProfiler:
             int: Размер KV кэша в байтах
 
         Examples:
-            >>> kv_cache_size = profile_memory_and_speed(engine, 1024)
+            >>> kv_cache_size = calculate_memory_and_speed(engine, 1024)
             >>> print(f"{kv_cache_size} байт")
             4325234 байт
         """
@@ -333,6 +346,74 @@ class KVCacheProfiler:
             * 2
         )
         return kv_cache_size
+
+
+class ProfileTable:
+    results = []
+
+    @classmethod
+    def add_result(
+        cls,
+        use_cache,
+        ttft,
+        tps,
+        peak_vram,
+        theoretical_kv_prefill,
+        theoretical_kv_total,
+    ):
+        cls.results.append(
+            {
+                "KV-Cache": "Да" if use_cache else "Нет",
+                "TTFT (s)": ttft,
+                "TPS": tps,
+                "Peak VRAM (GB)": peak_vram,
+                "KV Prefill (MB)": (
+                    theoretical_kv_prefill / 1024**2 if theoretical_kv_prefill else 0
+                ),
+                "KV Total (MB)": (
+                    theoretical_kv_total / 1024**2 if theoretical_kv_total else 0
+                ),
+            }
+        )
+
+    @classmethod
+    def print_table(cls):
+        print("\n")
+        print("=" * 100)
+        print("СРАВНИТЕЛЬНЫЙ ПРОФАЙЛИНГ KV-CACHE")
+        print("=" * 100)
+
+        headers = [
+            "KV-Cache",
+            "TTFT (s)",
+            "TPS",
+            "Peak VRAM (GB)",
+            "KV Prefill (MB)",
+            "KV Total (MB)",
+        ]
+
+        print(
+            f"{headers[0]:<12}"
+            f"{headers[1]:<12}"
+            f"{headers[2]:<12}"
+            f"{headers[3]:<18}"
+            f"{headers[4]:<18}"
+            f"{headers[5]:<18}"
+        )
+
+        print("-" * 100)
+
+        for result in cls.results:
+            print(
+                f"{result['KV-Cache']:<12}"
+                f"{result['TTFT (s)']:<12.4f}"
+                f"{result['TPS']:<12.2f}"
+                f"{result['Peak VRAM (GB)']:<18.2f}"
+                f"{result['KV Prefill (MB)']:<18.2f}"
+                f"{result['KV Total (MB)']:<18.2f}"
+            )
+
+        print("=" * 100)
 
 
 def main(samping_params: SamplingParams):
@@ -360,8 +441,10 @@ def main(samping_params: SamplingParams):
     print("ВРЕМЯ")
     print("=" * 50)
     if generate_result.time_to_first_token:
-        print(f"Время до первого токена: {generate_result.time_to_first_token:.2f}")
-    print(f"TPS: {generate_result.tokens_per_second:.0f} токенов/сек")
+        print(
+            f"TTFT(Время до первого токена): {generate_result.time_to_first_token:.2f}"
+        )
+    print(f"Decode TPS: {generate_result.tokens_per_second:.0f} токенов/сек")
     print(f"Времени потрачено: {finish_time:.2f} сек")
 
     max_vram_peak = torch.cuda.max_memory_allocated() / 1024**3
@@ -372,13 +455,25 @@ def main(samping_params: SamplingParams):
     print("=" * 50)
     print(f"Максимально использовалось памяти: {max_vram_peak:.2f} GB")
     print(f"Максимально выделилось памяти: {max_vram_reserved:.2f} GB")
-    if generate_result.kv_cache_total and generate_result.kv_cache_prefill:
+    if (
+        generate_result.theoretical_kv_cache_total
+        and generate_result.theoretical_kv_cache_prefill
+    ):
         print(
-            f"KV кэш - prefill: {generate_result.kv_cache_prefill} байт | {(generate_result.kv_cache_prefill / 1024**2):.2f} мб"
+            f"Теоритический KV кэш - prefill: {generate_result.theoretical_kv_cache_prefill} байт | {(generate_result.theoretical_kv_cache_prefill / 1024**2):.2f} мб"
         )
         print(
-            f"KV кэш - общий: {generate_result.kv_cache_total} байт | {(generate_result.kv_cache_total / 1024**2):.2f} мб"
+            f"Теоритический KV кэш - общий: {generate_result.theoretical_kv_cache_total} байт | {(generate_result.theoretical_kv_cache_total / 1024**2):.2f} мб"
         )
+
+    ProfileTable.add_result(
+        use_cache=samping_params.use_cache,
+        ttft=generate_result.time_to_first_token,
+        tps=generate_result.tokens_per_second,
+        peak_vram=max_vram_peak,
+        theoretical_kv_prefill=generate_result.theoretical_kv_cache_prefill,
+        theoretical_kv_total=generate_result.theoretical_kv_cache_total,
+    )
 
 
 print("=" * 50)
@@ -400,3 +495,5 @@ samping_params = SamplingParams(
 )
 
 main(samping_params)
+
+ProfileTable.print_table()
