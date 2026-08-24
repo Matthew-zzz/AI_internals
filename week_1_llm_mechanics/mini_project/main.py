@@ -215,11 +215,6 @@ class CustomInferenceEngine:
                     input_ids_prompt, use_cache=True, past_key_values=cache
                 )
 
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-
-                time_to_first_token = time.perf_counter() - start_ttft
-
                 next_token = self.sample_logits(
                     logits=output.logits[:, -1, :],
                     temperature=sampling_params.temperature,
@@ -227,6 +222,11 @@ class CustomInferenceEngine:
                     min_p=sampling_params.min_p,
                     repetition_penalty=sampling_params.repetition_penalty,
                 )
+
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                time_to_first_token = time.perf_counter() - start_ttft
 
                 generated_tokens = next_token
 
@@ -255,11 +255,6 @@ class CustomInferenceEngine:
             else:
                 output = self.model(input_ids_prompt, use_cache=False)
 
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-
-                time_to_first_token = time.perf_counter() - start_ttft
-
                 next_token = self.sample_logits(
                     output.logits[:, -1, :],
                     temperature=sampling_params.temperature,
@@ -267,6 +262,11 @@ class CustomInferenceEngine:
                     min_p=sampling_params.min_p,
                     repetition_penalty=sampling_params.repetition_penalty,
                 )
+
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+
+                time_to_first_token = time.perf_counter() - start_ttft
 
                 generated_tokens = next_token
 
