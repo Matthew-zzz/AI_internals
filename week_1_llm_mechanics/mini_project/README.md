@@ -8,14 +8,14 @@
 ## 🔬 Что доказывает выполение этого проекта:
 1. Вы понимаете математику и механику Transformer Decoder **на уровне тензорных операций**, а не вызова абстрактных обёрток.
 2. Вы умеете управлять состоянием `past_key_values` (KV-Cache) и рассчитывать необходимый объем VRAM под контекст по формуле:
-   $$\text{VRAM}_{\text{KV-Cache}} = 2 \times 2 \times n_{\text{layers}} \times n_{\text{heads}} \times d_{\text{head}} \times \text{seq\_len} \times \text{bytes\_per\_elem}$$
+   $$\text{VRAM}_{\text{KV-Cache}} = 2 \times n_{\text{layers}} \times n_{\text{heads}} \times d_{\text{head}} \times \text{seq\_len} \times \text{bytes\_per\_elem}$$
 3. Вы умеете применять современные алгоритмы фильтрации токенов (Min-P, Top-P, Repetition Penalty) для исключения галлюцинаций и зацикливаний.
 
 ---
 
 ## 📋 Чек-лист функционала решения:
-- [ ] Ручной Forward Pass с вычислением логитов без `model.generate()`.
-- [ ] Реализация кастомного сэмплирования: Temperature Scaling, Repetition Penalty, Min-P и Nucleus (Top-P) Filtering.
-- [ ] Ручное управление тензорами KV-Cache (`past_key_values`) с пошаговым обновлением.
-- [ ] Профайлер производительности: замер TPS (Tokens Per Second), задержки первого токена (TTFT — Time To First Token) и потребления RAM/VRAM при длине контекста 512, 2048 и 8192 токена.
-- [ ] Формирование итогового отчета производительности системы.
+- [x] Ручной Forward Pass с вычислением логитов без `model.generate()`.
+- [x] Реализация кастомного сэмплирования: Temperature Scaling, Repetition Penalty, Min-P и Nucleus (Top-P) Filtering.
+- [x] Ручное управление тензорами KV-Cache (`past_key_values`) с пошаговым обновлением.
+- [x] Профайлер производительности: замер TPS (Tokens Per Second), задержки первого токена (TTFT — Time To First Token) и потребления RAM/VRAM при длине контекста 512, 2048 и 8192 токена.
+- [x] Формирование итогового отчета производительности системы.
